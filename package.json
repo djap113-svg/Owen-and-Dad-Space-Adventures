@@ -1,0 +1,12 @@
+{
+  "name": "owen-and-dad-space-adventures",
+  "version": "1.0.0",
+  "description": "Two-player co-op vertical scrolling space shooter",
+  "main": "server.js",
+  "engines": { "node": ">=18" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}
