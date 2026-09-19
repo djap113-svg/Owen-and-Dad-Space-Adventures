@@ -82,6 +82,7 @@ function getRoom(code) {
       boss: null,
       starOffset: 0,
       snapAcc: 0,
+      events: [],
       lastMsg: '',
       msgUntil: 0,
     });
@@ -105,6 +106,13 @@ function makePlayer(socket, room, name) {
     input: { ax: 0, ay: 0, f: 0 },
     ready: false, ping: 0,
   };
+}
+
+// Sound events. The server decides what happened, so both players hear the
+// same things at the same moment. Capped so a chaotic frame can't bloat the
+// snapshot; the queue is emptied every time a snapshot goes out.
+function ev(room, ...a) {
+  if (room.events.length < 28) room.events.push(a);
 }
 
 function say(room, text, secs = 2.5) {
@@ -133,6 +141,7 @@ function buildWave(room) {
       hp, maxHp: hp, r: def.r, halfW: def.halfW, dir: 1, phase: 0, fireT: 1.6, frame: 0, hurt: 0,
       entering: true, score: def.score * (1 + loop), careDrops: 0,
     };
+    ev(room, 'W');
     say(room, `WAVE ${w} - WARNING: ${kind === 'hive' ? 'HIVE MOTHER' : kind === 'mech' ? 'CENTURIAN MECH' : 'MEGA BRAIN'}`, 3.2);
     return;
   }
@@ -150,6 +159,7 @@ function buildWave(room) {
     if (type === 'bomber' && Math.random() > 0.25) type = 'grunt';
     room.spawnQueue.push(type);
   }
+  ev(room, 'w', w);
   say(room, `WAVE ${w}`, 2.0);
 }
 
@@ -189,6 +199,7 @@ function enemyShot(room, x, y, tx, ty, speed, kind = 'shot') {
 }
 function boom(room, x, y, size = 1) {
   room.fx.push({ id: eid(), x, y, t: 0, life: 0.45, size });
+  ev(room, 'x', Math.round(size * 10) / 10);
 }
 function maybeDrop(room, x, y, chance) {
   if (Math.random() < chance) {
@@ -198,10 +209,12 @@ function maybeDrop(room, x, y, chance) {
 function damagePlayer(room, p, dmg) {
   if (!p.alive || p.invulUntil > 0) return;
   p.hp -= dmg;
+  ev(room, 'h', p.n);
   if (p.hp <= 0) {
     p.hp = 0;
     p.lives -= 1;
     p.alive = false;
+    ev(room, 'd', p.n);
     boom(room, p.x, p.y, 1.4);
     if (p.lives > 0) {
       p.respawnAt = RESPAWN_DELAY;
@@ -234,6 +247,7 @@ function step(room, dt) {
           p.alive = true; p.hp = MAX_HP; p.invulUntil = INVUL_TIME;
           p.x = p.n === 1 ? W * 0.35 : W * 0.65; p.y = H - 110;
           p.weapon = 'basic'; p.weaponUntil = 0;
+          ev(room, 'r', p.n);
         }
       }
       continue;
@@ -257,6 +271,7 @@ function step(room, dt) {
       });
       if (p.weapon === 'double') { mk(-11, -70); mk(11, 70); mk(0, 0); }
       else mk(0, 0);
+      ev(room, 's', p.n, p.weapon === 'double' ? 1 : 0);
     }
   }
 
@@ -273,6 +288,7 @@ function step(room, dt) {
       const e = room.enemies[j];
       if ((e.x - b.x) ** 2 + (e.y - b.y) ** 2 > (e.r + b.r) ** 2) continue;
       e.hp -= b.dmg; e.hurt = 0.12; hit = true;
+      if (e.hp > 0) ev(room, 't');
       if (e.hp <= 0) {
         boom(room, e.x, e.y, e.type === 'bomber' ? 1.3 : 1);
         maybeDrop(room, e.x, e.y, ENEMY[e.type].drop);
@@ -287,6 +303,7 @@ function step(room, dt) {
       const bs = room.boss;
       if ((bs.x - b.x) ** 2 + (bs.y - b.y) ** 2 <= (bs.r + b.r) ** 2) {
         bs.hp -= b.dmg; bs.hurt = 0.1; hit = true;
+        if (bs.hp > 0 && bs.hp % 4 === 0) ev(room, 'bt');
         // Care packages at 60% and 30% so a long boss fight stays winnable.
         const frac = bs.hp / bs.maxHp;
         if ((bs.careDrops === 0 && frac <= 0.6) || (bs.careDrops === 1 && frac <= 0.3)) {
@@ -301,6 +318,7 @@ function step(room, dt) {
           // Everyone shares the glory - the other player gets half.
           for (const p of room.players.values()) if (p.id !== b.owner) p.score += Math.round(bs.score / 2);
           room.boss = null;
+          ev(room, 'bd');
           say(room, 'BOSS DESTROYED!', 2.5);
         }
       }
@@ -436,6 +454,7 @@ function step(room, dt) {
       if ((p.x - u.x) ** 2 + (p.y - u.y) ** 2 <= (PLAYER_R + u.r + 6) ** 2) {
         if (u.kind === 'shield') p.hp = MAX_HP;
         else { p.weapon = u.kind; p.weaponUntil = 12; }
+        ev(room, 'u', u.kind);
         room.pickups.splice(k, 1);
         break;
       }
@@ -467,6 +486,7 @@ function step(room, dt) {
   const anyAlive = [...room.players.values()].some(p => p.lives > 0);
   if (!anyAlive && room.players.size > 0) {
     room.state = 'over';
+    ev(room, 'g');
     say(room, 'GAME OVER', 99);
   }
 }
@@ -479,6 +499,7 @@ function snapshot(room) {
     t: Date.now(),
     st: room.state,
     wv: room.wave,
+    bw: room.boss ? 1 : 0,
     so: Math.round(room.starOffset),
     msg: room.msgUntil > 0 ? room.lastMsg : '',
     ps: [...room.players.values()].map(p => [
@@ -493,6 +514,7 @@ function snapshot(room) {
     eb: room.ebullets.map(b => [b.id, Math.round(b.x), Math.round(b.y), Math.round(b.vx), Math.round(b.vy), b.kind === 'missile' ? 1 : 0]),
     pu: room.pickups.map(u => [u.id, Math.round(u.x), Math.round(u.y), u.kind]),
     fx: room.fx.map(f => [f.id, Math.round(f.x), Math.round(f.y), +(f.t / f.life).toFixed(2), f.size]),
+    ev: room.events,
     bo: room.boss ? [room.boss.id, room.boss.kind, Math.round(room.boss.x), Math.round(room.boss.y),
       Math.round(room.boss.vx * room.boss.dir), 0, room.boss.frame < 1 ? 0 : 1,
       room.boss.hurt > 0 ? 1 : 0, +(room.boss.hp / room.boss.maxHp).toFixed(3)] : null,
@@ -566,6 +588,7 @@ function startGame(room) {
     p.x = p.n === 1 ? W * 0.35 : W * 0.65; p.y = H - 110;
     p.ready = false;
   }
+  ev(room, 'go');
   say(room, 'GET READY', 1.6);
 }
 
@@ -590,6 +613,10 @@ setInterval(() => {
     if (room.snapAcc >= 1 / SNAP_HZ) {
       room.snapAcc = 0;
       io.to(room.code).emit('snap', snapshot(room));
+      // A fresh array, not .length = 0 - the snapshot we just handed to
+      // socket.io still points at the old one, and emptying it in place would
+      // strip the events back out before they were serialised.
+      room.events = [];
     }
   }
 }, 1000 / 60);
