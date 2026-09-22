@@ -50,14 +50,26 @@ const ENEMY = {
   bomber: { hp: 9,  speed: 58,  r: 25, score: 500, fire: 1.6,  drop: 0.35 },
 };
 
-// `halfW` is how far the sprite reaches sideways - the boss is kept that far
-// from the wall so it never slides half off the screen.
+/* --------------------------------------------------------------------------
+   Bosses. `halfW` is how far the sprite reaches sideways, so the boss is kept
+   that far from the wall and never slides half off screen. `title` is what the
+   WARNING banner announces.
+
+   Each boss gets its own `move` and `fire` below in BOSS_AI, because a boss
+   that only differs by artwork isn't really a new boss - the fight has to feel
+   different.
+   -------------------------------------------------------------------------- */
 const BOSS = {
-  hive:  { hp: 150, r: 58, score: 5000, halfW: 96 },
-  mech:  { hp: 220, r: 60, score: 7500, halfW: 58 },
-  brain: { hp: 320, r: 62, score: 10000, halfW: 80 },
+  hive:    { hp: 150, r: 58, score: 5000,  halfW: 96, title: 'HIVE MOTHER' },
+  mech:    { hp: 220, r: 60, score: 7500,  halfW: 58, title: 'CENTURIAN MECH' },
+  brain:   { hp: 300, r: 62, score: 10000, halfW: 80, title: 'MEGA BRAIN' },
+  dread:   { hp: 330, r: 66, score: 12000, halfW: 99, title: 'DREADNOUGHT', homeY: 104 },
+  kraken:  { hp: 360, r: 64, score: 14000, halfW: 72, title: 'THE KRAKEN' },
+  walker:  { hp: 390, r: 66, score: 16000, halfW: 84, title: 'CORTEX WALKER', homeY: 116 },
+  crystal: { hp: 400, r: 60, score: 18000, halfW: 82, title: 'CRYSTAL WARDEN', homeY: 132 },
+  cthulhu: { hp: 420, r: 64, score: 22000, halfW: 78, title: 'VOID CTHULHU' },
 };
-const BOSS_ORDER = ['hive', 'mech', 'brain'];
+const BOSS_ORDER = ['hive', 'mech', 'brain', 'dread', 'kraken', 'walker', 'crystal', 'cthulhu'];
 
 const POWERUPS = ['double', 'rapid', 'shield'];
 
@@ -133,16 +145,20 @@ function buildWave(room) {
 
   if (w % 5 === 0) {
     const kind = BOSS_ORDER[(Math.floor(w / 5) - 1) % BOSS_ORDER.length];
-    const loop = Math.floor((w - 1) / 15);          // each full boss cycle gets tougher
+    // One full lap through every boss before anyone repeats; each lap after
+    // that is meaningfully tougher.
+    const loop = Math.floor((w - 1) / (5 * BOSS_ORDER.length));
     const def = BOSS[kind];
-    const hp = Math.round(def.hp * (1 + loop * 0.6) * (1 + (room.players.size - 1) * 0.35));
+    const hp = Math.round(def.hp * (1 + loop * 0.6) * (1 + (room.players.size - 1) * 0.28));
     room.boss = {
-      id: eid(), kind, x: W / 2, y: -120, vx: 70 + loop * 18, vy: 0,
-      hp, maxHp: hp, r: def.r, halfW: def.halfW, dir: 1, phase: 0, fireT: 1.6, frame: 0, hurt: 0,
+      id: eid(), kind, x: W / 2, y: -160, vx: 70 + loop * 18, vy: 0,
+      homeY: def.homeY || 120,
+      hp, maxHp: hp, r: def.r, halfW: def.halfW, dir: 1, phase: 0, fireT: 1.8, frame: 0, hurt: 0,
       entering: true, score: def.score * (1 + loop), careDrops: 0,
+      mode: 'stalk', modeT: 2.2, side: false, volley: 0, sweep: 0, spin: 0, lance: 0, summon: 0,
     };
     ev(room, 'W');
-    say(room, `WAVE ${w} - WARNING: ${kind === 'hive' ? 'HIVE MOTHER' : kind === 'mech' ? 'CENTURIAN MECH' : 'MEGA BRAIN'}`, 3.2);
+    say(room, `WAVE ${w} - WARNING: ${def.title}`, 3.2);
     return;
   }
 
@@ -223,6 +239,168 @@ function damagePlayer(room, p, dmg) {
     }
   }
 }
+
+/* ==========================================================================
+   Boss behaviour
+   --------------------------------------------------------------------------
+   Every boss has a `move` (how it flies) and a `fire` (what it shoots). `fire`
+   returns how many seconds until it should fire again, which lets each boss
+   set its own rhythm.
+   ========================================================================== */
+function clampBoss(bs) {
+  const lim = bs.halfW + 4;
+  if (bs.x < lim) { bs.x = lim; bs.dir = 1; }
+  if (bs.x > W - lim) { bs.x = W - lim; bs.dir = -1; }
+  bs.y = clamp(bs.y, 70, H * 0.5);
+}
+// fire a bullet at an absolute angle
+function shotAt(room, x, y, ang, speed, kind = 'shot') {
+  room.ebullets.push({ id: eid(), x, y, vx: Math.cos(ang) * speed, vy: Math.sin(ang) * speed,
+                       kind, r: kind === 'missile' ? 9 : 6 });
+}
+// the classic sideways patrol with a gentle bob
+function sway(room, bs, dt, bobSpeed = 0.9, bob = 26) {
+  bs.x += bs.vx * bs.dir * dt;
+  bs.y = bs.homeY + Math.sin(bs.phase * bobSpeed) * bob;
+}
+
+const BOSS_AI = {
+  // Swarm queen: walls of downward fire, and she keeps calling in grunts.
+  hive: {
+    move: (r, b, dt) => sway(r, b, dt),
+    fire: (r, b) => {
+      for (let a = -2; a <= 2; a++) enemyShot(r, b.x, b.y + 40, b.x + a * 70, b.y + 300, 230);
+      if (Math.random() < 0.5 && r.enemies.length < 24) spawnEnemy(r, 'grunt');
+      return 1.5;
+    },
+  },
+
+  // Gunship: one aimed shot down the middle, two wide - there's a gap to fly through.
+  mech: {
+    move: (r, b, dt) => sway(r, b, dt),
+    fire: (r, b, tgt) => {
+      if (tgt) {
+        const ang = Math.atan2(tgt.y - b.y, tgt.x - b.x);
+        shotAt(r, b.x, b.y + 40, ang, 245);
+        shotAt(r, b.x, b.y + 40, ang - 0.42, 225);
+        shotAt(r, b.x, b.y + 40, ang + 0.42, 225);
+      }
+      return 1.55;
+    },
+  },
+
+  // Psychic: expanding rings you have to weave out of.
+  brain: {
+    move: (r, b, dt) => sway(r, b, dt, 0.7, 30),
+    fire: (r, b) => {
+      for (let a = 0; a < 10; a++) shotAt(r, b.x, b.y, (a / 10) * Math.PI * 2 + b.phase, 160);
+      return 2.0;
+    },
+  },
+
+  // Capital ship: alternating broadsides from the port and starboard gun pods,
+  // with a missile volley every few passes. Slow and heavy.
+  dread: {
+    move: (r, b, dt) => sway(r, b, dt, 0.5, 14),
+    fire: (r, b, tgt) => {
+      b.side = !b.side;
+      const px = b.x + (b.side ? -62 : 62);
+      for (let i = 0; i < 4; i++) shotAt(r, px, b.y + 26, Math.PI / 2 + (i - 1.5) * 0.14, 265);
+      b.volley = (b.volley || 0) + 1;
+      if (b.volley % 4 === 0 && tgt) {
+        enemyShot(r, b.x - 62, b.y + 26, tgt.x, tgt.y, 175, 'missile');
+        enemyShot(r, b.x + 62, b.y + 26, tgt.x, tgt.y, 175, 'missile');
+      }
+      return 1.05;
+    },
+  },
+
+  // Sea monster: drifts in a figure-eight and lashes a sweeping fan of shots
+  // back and forth, like tentacles whipping across the screen.
+  kraken: {
+    move: (r, b, dt) => {
+      b.x += Math.cos(b.phase * 0.8) * 92 * dt;
+      b.y = b.homeY + Math.sin(b.phase * 1.6) * 46;
+    },
+    fire: (r, b) => {
+      b.sweep = (b.sweep || 0) + 0.28;
+      const centre = Math.PI / 2 + Math.sin(b.sweep) * 0.85;
+      for (let i = -2; i <= 2; i++) shotAt(r, b.x, b.y + 30, centre + i * 0.2, 215);
+      return 0.5;
+    },
+  },
+
+  // Brain on legs: charges at whoever is closest, then slams down a shockwave
+  // ring. Stay away from it while it's moving fast.
+  walker: {
+    move: (r, b, dt) => {
+      b.mode = b.mode || 'stalk';
+      b.modeT = (b.modeT || 0) - dt;
+      if (b.mode === 'stalk') {
+        const tgt = nearestPlayer(r, b.x, b.y);
+        if (tgt) b.x += Math.sign(tgt.x - b.x) * 70 * dt;
+        b.y = b.homeY + Math.sin(b.phase * 1.1) * 12;
+        if (b.modeT <= 0) { b.mode = 'charge'; b.modeT = 1.1; b.chargeDir = Math.sign(Math.random() - 0.5) || 1; }
+      } else {
+        b.x += b.chargeDir * 340 * dt;
+        b.y = b.homeY + 26;
+        if (b.x <= b.halfW + 6 || b.x >= W - b.halfW - 6) b.chargeDir *= -1;
+        if (b.modeT <= 0) {
+          b.mode = 'stalk'; b.modeT = 2.6;
+          for (let a = 0; a < 14; a++) shotAt(r, b.x, b.y, (a / 14) * Math.PI * 2, 135);  // shockwave
+          boom(r, b.x, b.y + 40, 1.2);
+        }
+      }
+    },
+    fire: (r, b, tgt) => {
+      if (b.mode === 'charge') return 0.4;
+      if (tgt) { shotAt(r, b.x - 30, b.y + 30, Math.atan2(tgt.y - b.y, tgt.x - b.x), 250);
+                 shotAt(r, b.x + 30, b.y + 30, Math.atan2(tgt.y - b.y, tgt.x - b.x), 250); }
+      return 1.1;
+    },
+  },
+
+  // Crystal: nearly stationary, but pours out a slow rotating spiral that
+  // fills the screen. Positioning puzzle rather than a dodge-fest.
+  crystal: {
+    move: (r, b, dt) => {
+      b.x += Math.cos(b.phase * 0.35) * 42 * dt;
+      b.y = b.homeY + Math.sin(b.phase * 0.55) * 18;
+    },
+    fire: (r, b) => {
+      b.spin = (b.spin || 0) + 0.41;
+      for (let arm = 0; arm < 3; arm++) shotAt(r, b.x, b.y, b.spin + arm * (Math.PI * 2 / 3), 150);
+      b.lance = (b.lance || 0) + 1;
+      if (b.lance % 12 === 0) {
+        const tgt = nearestPlayer(r, b.x, b.y);
+        if (tgt) for (let i = 0; i < 3; i++)
+          enemyShot(r, b.x + (i - 1) * 26, b.y + 20, tgt.x, tgt.y, 330);
+      }
+      return 0.24;
+    },
+  },
+
+  // Eldritch: fires at BOTH players at once so you can't hide behind each
+  // other, and keeps summoning mines to crowd you.
+  cthulhu: {
+    move: (r, b, dt) => {
+      sway(r, b, dt, 1.2, 34);
+      b.x += Math.sin(b.phase * 2.3) * 26 * dt;
+    },
+    fire: (r, b) => {
+      const live = livePlayers(r);
+      for (const p of live) {
+        const ang = Math.atan2(p.y - b.y, p.x - b.x);
+        shotAt(r, b.x, b.y + 30, ang, 240);
+        shotAt(r, b.x, b.y + 30, ang - 0.3, 205);
+        shotAt(r, b.x, b.y + 30, ang + 0.3, 205);
+      }
+      b.summon = (b.summon || 0) + 1;
+      if (b.summon % 3 === 0 && r.enemies.length < 14) spawnEnemy(r, 'mine');
+      return 1.35;
+    },
+  },
+};
 
 /* ==========================================================================
    Simulation step
@@ -386,40 +564,18 @@ function step(room, dt) {
     bs.frame = (bs.frame + dt * 3) % 2;
     if (bs.entering) {
       bs.y += 70 * dt;
-      if (bs.y >= 120) { bs.y = 120; bs.entering = false; }
+      if (bs.y >= bs.homeY) { bs.y = bs.homeY; bs.entering = false; }
     } else {
-      bs.x += bs.vx * bs.dir * dt;
-      const lim = bs.halfW + 4;
-      if (bs.x < lim) { bs.x = lim; bs.dir = 1; }
-      if (bs.x > W - lim) { bs.x = W - lim; bs.dir = -1; }
-      bs.y = 120 + Math.sin(bs.phase * 0.9) * 26;
+      const ai = BOSS_AI[bs.kind] || BOSS_AI.hive;
+      ai.move(room, bs, dt);
+      clampBoss(bs);
 
       bs.fireT -= dt;
       if (bs.fireT <= 0) {
-        const tgt = nearestPlayer(room, bs.x, bs.y);
-        const rage = bs.hp / bs.maxHp < 0.4 ? 0.6 : 1;
-        if (bs.kind === 'hive') {
-          for (let a = -2; a <= 2; a++) enemyShot(room, bs.x, bs.y + 40, bs.x + a * 70, bs.y + 300, 230);
-          if (Math.random() < 0.5 && room.enemies.length < 24) spawnEnemy(room, 'grunt');
-          bs.fireT = 1.5 * rage;
-        } else if (bs.kind === 'mech') {
-          // One aimed shot down the middle, two wide - leaves a gap you can fly through.
-          if (tgt) {
-            enemyShot(room, bs.x, bs.y + 40, tgt.x, tgt.y, 245);
-            const ang = Math.atan2(tgt.y - bs.y, tgt.x - bs.x);
-            for (const off of [-0.42, 0.42]) {
-              room.ebullets.push({ id: eid(), x: bs.x, y: bs.y + 40, vx: Math.cos(ang + off) * 225, vy: Math.sin(ang + off) * 225, kind: 'shot', r: 6 });
-            }
-          }
-          bs.fireT = 1.55 * rage;
-        } else {
-          const n = 10;
-          for (let a = 0; a < n; a++) {
-            const ang = (a / n) * Math.PI * 2 + bs.phase;
-            room.ebullets.push({ id: eid(), x: bs.x, y: bs.y, vx: Math.cos(ang) * 160, vy: Math.sin(ang) * 160, kind: 'shot', r: 6 });
-          }
-          bs.fireT = 2.0 * rage;
-        }
+        // Below 40% health every boss speeds up - the fight gets frantic at
+        // the end instead of grinding on at the same pace.
+        const rage = bs.hp / bs.maxHp < 0.4 ? 0.65 : 1;
+        bs.fireT = ai.fire(room, bs, nearestPlayer(room, bs.x, bs.y)) * rage;
         // Boss waves have no regular enemies to farm, so trickle a few in -
         // they're the only source of power-ups during a long fight.
         if (room.enemies.length < 4 && Math.random() < 0.35) spawnEnemy(room, Math.random() < 0.5 ? 'grunt' : 'scout');
